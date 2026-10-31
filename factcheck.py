@@ -1,4 +1,3 @@
-
 import torch
 from typing import List
 import numpy as np
@@ -8,213 +7,265 @@ import re
 
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOP_WORDS
 from nltk.stem import PorterStemmer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 
-# FactExample
+#overlapping to  be used to compare
+OVERLAP_METRICS = [
+    "rouge-1",
+    "rouge-2",
+    "rouge-l",
+    "bleu",
+    "cosine_similarity",
+    "jaccard_similarity"
+]
+
+# Text Preprocessing
+STOP_WORDS = set(SPACY_STOP_WORDS)
+# Preserve negation words because they can change meaning
+STOP_WORDS -= {"not", "no", "never"}
+
+_stemmer = PorterStemmer()
+
+def preprocess_text(text: str, remove_stop_words: bool = True, stem: bool = True) -> List[str]:
+    #  Remove special sentence markers
+    text = re.sub(r"</?s>", " ", text)
+
+    # Normalize whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
+    #  Convert to lowercase
+    text = text.lower()
+
+    #  Tokenization
+    words = re.findall(r"[a-z0-9]+", text)
+
+    #  Stopword removal 
+    if remove_stop_words:
+        words = [word for word in words if word not in STOP_WORDS]
+
+    #  Stemming
+    if stem:
+        words = [_stemmer.stem(word) for word in words]
+
+    return words
+
+
+# METRIC COMPUTATIONS
+
+def compute_rouge_1(fact_tokens: List[str], passage_tokens: List[str]) -> float:
+
+    if not fact_tokens:
+        return 0.0
+    
+    fact_set = set(fact_tokens)
+    passage_set = set(passage_tokens)
+    overlap = fact_set.intersection(passage_set)
+    
+    return len(overlap) / len(fact_set)
+
+
+def compute_rouge_2(fact_tokens: List[str], passage_tokens: List[str]) -> float:
+    
+    if len(fact_tokens) < 2 or len(passage_tokens) < 2:
+        return 0.0
+    
+    fact_bigrams = set(zip(fact_tokens[:-1], fact_tokens[1:]))
+    passage_bigrams = set(zip(passage_tokens[:-1], passage_tokens[1:]))
+    
+    overlap = fact_bigrams.intersection(passage_bigrams)
+    return len(overlap) / len(fact_bigrams)
+
+
+def compute_rouge_l(fact_tokens: List[str], passage_tokens: List[str]) -> float:
+
+    if not fact_tokens or not passage_tokens:
+        return 0.0
+    
+    m, n = len(fact_tokens), len(passage_tokens)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if fact_tokens[i - 1] == passage_tokens[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+                
+    lcs_length = dp[m][n]
+    return lcs_length / len(fact_tokens)
+
+
+def compute_bleu(fact_tokens: List[str], passage_tokens: List[str], weights=(0.5, 0.5)) -> float:
+
+    if not fact_tokens or not passage_tokens:
+        return 0.0
+
+    # 1-gram precision
+    p1 = len(set(fact_tokens).intersection(set(passage_tokens))) / len(fact_tokens)
+    
+    # 2-gram precision
+    if len(fact_tokens) > 1 and len(passage_tokens) > 1:
+        f_bi = set(zip(fact_tokens[:-1], fact_tokens[1:]))
+        p_bi = set(zip(passage_tokens[:-1], passage_tokens[1:]))
+        p2 = len(f_bi.intersection(p_bi)) / len(f_bi) if f_bi else 0.0
+    else:
+        p2 = p1
+
+    eps = 1e-7
+    log_p1 = np.log(p1 + eps)
+    log_p2 = np.log(p2 + eps)
+    
+    geom_avg = np.exp(weights[0] * log_p1 + weights[1] * log_p2)
+    
+    fact_len = len(fact_tokens)
+    pass_len = len(passage_tokens)
+    bp = 1.0 if pass_len >= fact_len else np.exp(1 - fact_len / pass_len)
+    
+    return float(bp * geom_avg)
+
+
+def compute_jaccard_similarity(fact_tokens: List[str], passage_tokens: List[str]) -> float:
+    """Jaccard Similarity: Intersection over Union of token sets."""
+    fact_set = set(fact_tokens)
+    passage_set = set(passage_tokens)
+
+    intersection = fact_set.intersection(passage_set)
+    union = fact_set.union(passage_set)
+
+    if not union:
+        return 0.0
+
+    return len(intersection) / len(union)
+
+
+def compute_cosine_similarity(fact_tokens: List[str], passage_tokens: List[str]) -> float:
+    """TF-IDF Cosine Similarity on pre-tokenized token lists."""
+    if not fact_tokens or not passage_tokens:
+        return 0.0
+
+    fact_text = " ".join(fact_tokens)
+    passage_text = " ".join(passage_tokens)
+
+    vectorizer = TfidfVectorizer(
+        tokenizer=str.split,
+        token_pattern=None,
+        lowercase=False
+    )
+
+    try:
+        vectors = vectorizer.fit_transform([fact_text, passage_text])
+        score = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
+        return float(score)
+    except ValueError:
+        return 0.0
+
+
+def overlap_score(metric: str, fact_tokens: List[str], passage_tokens: List[str]) -> float:
+ 
+    metric = metric.lower()
+    if metric == "rouge-1":
+        return compute_rouge_1(fact_tokens, passage_tokens)
+    elif metric == "rouge-2":
+        return compute_rouge_2(fact_tokens, passage_tokens)
+    elif metric == "rouge-l":
+        return compute_rouge_l(fact_tokens, passage_tokens)
+    elif metric == "bleu":
+        return compute_bleu(fact_tokens, passage_tokens)
+    elif metric == "cosine_similarity":
+        return compute_cosine_similarity(fact_tokens, passage_tokens)
+    elif metric == "jaccard_similarity":
+        return compute_jaccard_similarity(fact_tokens, passage_tokens)
+    else:
+        raise ValueError(f"Unknown metric '{metric}'. Expected one of {OVERLAP_METRICS}")
+
+
 
 class FactExample(object):
-
     def __init__(self, fact: str, passages: List[dict], label: str):
         self.fact = fact
         self.passages = passages
         self.label = label
 
     def __repr__(self):
-        return repr(
-            "fact=" + repr(self.fact)
-            + "; label=" + repr(self.label)
-            + "; passages=" + repr(self.passages)
-        )
-
-
-# Entailment Model
-
-class EntailmentModel(object):
-
-    def __init__(self, model, tokenizer, cuda=False):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.cuda = cuda
-
-    def check_entailment(self, premise: str, hypothesis: str):
-
-        with torch.no_grad():
-
-            inputs = self.tokenizer(
-                premise,
-                hypothesis,
-                return_tensors='pt',
-                truncation=True,
-                padding=True
-            )
-
-            if self.cuda:
-                inputs = {
-                    key: value.to('cuda')
-                    for key, value in inputs.items()
-                }
-
-            outputs = self.model(**inputs)
-            logits = outputs.logits
-
-        # TODO: Implement entailment prediction
-
-        raise Exception("Not implemented")
-
-
-# Base FactChecker
+        return repr("fact=" + repr(self.fact) + "; label=" + repr(self.label) + "; passages=" + repr(self.passages))
 
 
 class FactChecker(object):
-
     def predict(self, fact: str, passages: List[dict]) -> str:
         raise Exception("Don't call me, call my subclasses")
 
 
-# Baseline FactCheckers
+#TASK ONE FUNCTION CALL
+
+class WordRecallThresholdFactChecker(FactChecker):
+
+    def __init__(self, metric: str = 'rouge-1', threshold: float = 0.625, remove_stop_words: bool = True, stem: bool = True):
+        self.metric = metric.lower()
+        self.threshold = threshold
+        self.remove_stop_words = remove_stop_words
+        self.stem = stem
+
+    def predict(self, fact: str, passages: List[dict]) -> str:
+        fact_tokens = preprocess_text(fact, remove_stop_words=self.remove_stop_words, stem=self.stem)
+        
+        max_score = 0.0
+        
+        for passage in passages:
+            passage_text = passage.get('text', '')
+            passage_tokens = preprocess_text(passage_text, remove_stop_words=self.remove_stop_words, stem=self.stem)
+            
+            score = overlap_score(self.metric, fact_tokens, passage_tokens)
+            if score > max_score:
+                max_score = score
+
+        return "S" if max_score >= self.threshold else "NS"
 
 
 class RandomGuessFactChecker(FactChecker):
-
     def predict(self, fact: str, passages: List[dict]) -> str:
         prediction = np.random.choice(["S", "NS"])
         return prediction
 
 
 class AlwaysEntailedFactChecker(FactChecker):
-
     def predict(self, fact: str, passages: List[dict]) -> str:
         return "S"
 
 
 
-# Text Preprocessing
+class EntailmentModel(object):
+    def __init__(self, model, tokenizer, cuda=False):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.cuda = cuda
 
-STOP_WORDS = set(SPACY_STOP_WORDS)
+    def check_entailment(self, premise: str, hypothesis: str):
+        with torch.no_grad():
+            inputs = self.tokenizer(premise, hypothesis, return_tensors='pt', truncation=True, padding=True)
+            if self.cuda:
+                inputs = {key: value.to('cuda') for key, value in inputs.items()}
+            outputs = self.model(**inputs)
+            logits = outputs.logits
 
-# Preserve negation words because they can change meaning
-STOP_WORDS -= {"not", "no", "never"}
+        del inputs, outputs
+        gc.collect()
 
-_stemmer = PorterStemmer()
-
-
-def preprocess_text(text: str) -> List[str]:
-
-    # 1. Remove special sentence markers
-    text = re.sub(r"</?s>", " ", text)
-
-    # 2. Normalize whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-
-    # 3. Convert to lowercase
-    text = text.lower()
-
-    # 4. Tokenization
-    words = re.findall(r"[a-z0-9]+", text)
-
-    # 5. Stopword removal
-    words = [
-        word for word in words
-        if word not in STOP_WORDS
-    ]
-
-    # 6. Apply Porter stemming
-    words = [
-        _stemmer.stem(word)
-        for word in words
-    ]
-
-    return words
-
-# Part 1: Word Recall Threshold FactChecker
+        return logits
 
 
-
-class WordRecallThresholdFactChecker(FactChecker):
-
-    def __init__(self, threshold: float = 0.72):
-        self.threshold = threshold
-
-    def score(self, fact: str, passages: List[dict]) -> float:
-
-        # Preprocess the fact
-        fact_words = set(preprocess_text(fact))
-
-        if not fact_words:
-            return 0.0
-
-        # Preprocess all retrieved passages
-        passage_words = set()
-
-        for passage in passages:
-            passage_words.update(
-                preprocess_text(passage["text"])
-            )
-
-        # Calculate word overlap
-        overlap = len(fact_words.intersection(passage_words))
-
-        # Calculate word recall
-        recall = overlap / len(fact_words)
-
-        return recall
+class EntailmentFactChecker(FactChecker):
+    def __init__(self, ent_model):
+        self.ent_model = ent_model
 
     def predict(self, fact: str, passages: List[dict]) -> str:
+        raise Exception("Implement me for Part 2")
 
-        score = self.score(fact, passages)
-
-        if score >= self.threshold:
-            return "S"
-
-        return "NS"
-
-
-
-
-
-# Optional: Dependency Recall FactChecker
 
 class DependencyRecallThresholdFactChecker(FactChecker):
-
     def __init__(self):
         self.nlp = spacy.load('en_core_web_sm')
 
     def predict(self, fact: str, passages: List[dict]) -> str:
-
-        # TODO: Implement dependency-based classification
         raise Exception("Implement me")
-
-    def get_dependencies(self, sent: str):
-
-        processed_sent = self.nlp(sent)
-
-        relations = set()
-
-        for token in processed_sent:
-
-            ignore_dep = [
-                'punct', 'ROOT', 'root', 'det',
-                'case', 'aux', 'auxpass', 'dep',
-                'cop', 'mark'
-            ]
-
-            if token.is_punct or token.dep_ in ignore_dep:
-                continue
-
-            head = (
-                token.head.lemma_
-                if token.head.pos_ == 'VERB'
-                else token.head.text
-            )
-
-            dependent = (
-                token.lemma_
-                if token.pos_ == 'VERB'
-                else token.text
-            )
-
-            relation = (head, token.dep_, dependent)
-
-            relations.add(relation)
-
-        return relations
