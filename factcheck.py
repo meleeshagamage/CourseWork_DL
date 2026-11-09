@@ -235,6 +235,7 @@ class AlwaysEntailedFactChecker(FactChecker):
 
 
 
+# PHASE 2: Textual Entailment (DeBERTa-v3)
 class EntailmentModel(object):
     def __init__(self, model, tokenizer, cuda=False):
         self.model = model
@@ -243,24 +244,67 @@ class EntailmentModel(object):
 
     def check_entailment(self, premise: str, hypothesis: str):
         with torch.no_grad():
-            inputs = self.tokenizer(premise, hypothesis, return_tensors='pt', truncation=True, padding=True)
+            inputs = self.tokenizer(
+                premise,
+                hypothesis,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=True
+            )
             if self.cuda:
-                inputs = {key: value.to('cuda') for key, value in inputs.items()}
-            outputs = self.model(**inputs)
-            logits = outputs.logits
-
-        del inputs, outputs
-        gc.collect()
-
+                inputs = {key: value.to("cuda") for key, value in inputs.items()}
+            logits = self.model(**inputs).logits
         return logits
 
 
 class EntailmentFactChecker(FactChecker):
     def __init__(self, ent_model):
         self.ent_model = ent_model
+        print("Model Labels:", self.ent_model.model.config.id2label)
+        self.pruning_threshold = 0.20
+        self.entailment_threshold = 0.40
+        self.last_best_score = 0.0
+        self.last_best_evidence = ""
+
+    @staticmethod
+    def _extract_sentences(text: str) -> List[str]:
+        text = text.replace(r"\<s>", "<s>").replace(r"\</s>", "</s>")
+        text = re.sub(r"</?s>", "\n", text)
+        pieces = []
+        for chunk in text.splitlines():
+            for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z])", chunk.strip()):
+                sentence = sentence.strip()
+                if sentence:
+                    pieces.append(sentence)
+        return pieces
 
     def predict(self, fact: str, passages: List[dict]) -> str:
-        raise Exception("Implement me for Part 2")
+        best_score = 0.0
+        best_evidence = ""
+        fact_tokens = preprocess_text(fact)
+
+        for passage in passages:
+            sentences = self._extract_sentences(passage.get("text", ""))
+            candidates = list(sentences)
+            candidates.extend(
+                sentences[i] + " " + sentences[i + 1]
+                for i in range(len(sentences) - 1)
+            )
+
+            for evidence in candidates:
+                overlap = compute_rouge_1(fact_tokens, preprocess_text(evidence))
+                if overlap < self.pruning_threshold:
+                    continue
+                logits = self.ent_model.check_entailment(evidence, fact)
+                score = torch.softmax(logits, dim=-1)[0][0].item()
+                if score > best_score:
+                    best_score = score
+                    best_evidence = evidence
+
+        self.last_best_score = best_score
+        self.last_best_evidence = best_evidence
+        return "S" if best_score >= self.entailment_threshold else "NS"
 
 
 class DependencyRecallThresholdFactChecker(FactChecker):
